@@ -64,7 +64,7 @@ class ImageUtils:
     @staticmethod
     def process_background(bg: Image.Image, target_width: int = 800, 
                            target_height: int = 1200) -> Image.Image:
-        """一步居中裁剪并缩放到目标尺寸，避免额外的中间大图拷贝。"""
+        """一步居中裁剪并缩放到目标尺寸，保留图像模式与透明度。"""
         bg_ratio = bg.width / bg.height
         target_ratio = target_width / target_height
         
@@ -77,18 +77,11 @@ class ImageUtils:
             top = (bg.height - new_height) // 2
             crop_box = (0, top, bg.width, top + new_height)
         
-        resized = bg.resize(
+        return bg.resize(
             (target_width, target_height),
             Image.Resampling.LANCZOS,
             box=crop_box,
         )
-        
-        if resized.mode != 'RGB':
-            try:
-                return resized.convert('RGB')
-            finally:
-                resized.close()
-        return resized
     
     @staticmethod
     def _apply_mosaic_in_place(
