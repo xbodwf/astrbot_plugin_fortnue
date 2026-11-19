@@ -1,4 +1,1 @@
-colornamer==0.2.3
-scikit-image>=0.22.0
-webcolors>=1.12
 zhdate
