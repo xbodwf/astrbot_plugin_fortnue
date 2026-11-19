@@ -1,7 +1,9 @@
 """运势生成模块"""
+import contextlib
 import random
 import json
 import os
+import tempfile
 from datetime import datetime
 from io import BytesIO
 from astrbot.api import logger
@@ -27,6 +29,7 @@ class FortuneGenerator:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
         self.yunshi_data_path = StarTools.get_data_dir("astrbot_plugin_fortnue") / "yunshi.json"
+        self._fortune_data = self._load_fortune_data()
         self.user_fortune_data = self._load_yunshi_data()
     
     def _load_yunshi_data(self) -> dict:
@@ -34,18 +37,42 @@ class FortuneGenerator:
         try:
             if os.path.exists(self.yunshi_data_path):
                 with open(self.yunshi_data_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        today_str = datetime.now().strftime("%Y-%m-%d")
+                        return {
+                            uid: entry
+                            for uid, entry in data.items()
+                            if isinstance(entry, dict) and entry.get("date") == today_str
+                        }
         except Exception as e:
             logger.error(f"加载运势数据失败: {e}")
         return {}
     
     def _save_yunshi_data(self):
-        """保存用户运势数据到文件"""
+        """原子保存用户运势数据到文件"""
+        tmp_path = None
         try:
-            with open(self.yunshi_data_path, "w", encoding="utf-8") as f:
+            parent_dir = os.path.dirname(os.path.abspath(self.yunshi_data_path))
+            os.makedirs(parent_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=parent_dir,
+                prefix=".yunshi_",
+                suffix=".tmp",
+                delete=False,
+            ) as f:
                 json.dump(self.user_fortune_data, f, ensure_ascii=False, indent=2)
+                tmp_path = f.name
+            os.replace(tmp_path, self.yunshi_data_path)
+            tmp_path = None
         except Exception as e:
             logger.error(f"保存运势数据失败: {e}")
+        finally:
+            if tmp_path:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
     
     def reset_all_fortune_data(self) -> int:
         """重置所有用户的运势数据，返回被重置的用户数量"""
@@ -106,7 +133,10 @@ class FortuneGenerator:
                 else:
                     return user_data["fortune_data"]
         
-        fortune_data = self._load_fortune_data()
+        fortune_data = self._fortune_data
+        if not fortune_data:
+            fortune_data = self._load_fortune_data()
+            self._fortune_data = fortune_data
         if not fortune_data:
             return {
                 "fortune": {
@@ -146,6 +176,12 @@ class FortuneGenerator:
             "luck_value": int(selected_level)
         }
         
+        # 清理非今日的过期记录，防止 yunshi.json 无限增长
+        self.user_fortune_data = {
+            uid: entry
+            for uid, entry in self.user_fortune_data.items()
+            if isinstance(entry, dict) and entry.get("date") == today_str
+        }
         self.user_fortune_data[user_id] = {
             "date": today_str,
             "fortune_data": result_data
