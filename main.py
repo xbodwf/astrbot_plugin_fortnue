@@ -334,8 +334,8 @@ class FortunePlugin(Star):
         temp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                f.write(jpeg_bytes)
                 temp_path = f.name
+                f.write(jpeg_bytes)
             yield event.image_result(temp_path)
         finally:
             if temp_path:
