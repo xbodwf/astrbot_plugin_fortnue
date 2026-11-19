@@ -154,148 +154,181 @@ class FortuneGenerator:
         return result_data
     
     def create_fortune_image(self, background: Image.Image, avatar: Image.Image | None,
-                             user_name: str, fortune_data: dict, addition_text: str = "") -> Image.Image:
+                             user_name: str, fortune_data: dict, addition_text: str = "",
+                             save_background_path: str | None = None) -> Image.Image:
         """创建运势图片"""
         target_width = 800
         target_height = 1200
         
-        # 处理背景图片
+        # 处理背景图片（先裁剪缩放到目标尺寸，减少后续内存占用）
         bg_ratio = background.width / background.height
         target_ratio = target_width / target_height
         
         if bg_ratio > target_ratio:
             new_width = int(background.height * target_ratio)
             left = (background.width - new_width) // 2
-            background = background.crop((left, 0, left + new_width, background.height))
+            cropped = background.crop((left, 0, left + new_width, background.height))
         else:
             new_height = int(background.width / target_ratio)
             top = (background.height - new_height) // 2
-            background = background.crop((0, top, background.width, top + new_height))
+            cropped = background.crop((0, top, background.width, top + new_height))
         
-        background = background.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        
-        if background.mode != 'RGBA':
-            background = background.convert('RGBA')
-        
-        # 底部半透明遮罩
-        overlay = Image.new('RGBA', (target_width, target_height), (0, 0, 0, 0))
-        overlay_draw = ImageDraw.Draw(overlay)
-        
-        gradient_start_y = target_height - 600
-        for y in range(gradient_start_y, target_height):
-            alpha = int(200 * (y - gradient_start_y) / (target_height - gradient_start_y))
-            overlay_draw.rectangle([(0, y), (target_width, y + 1)], fill=(0, 0, 0, alpha))
-        
-        background = Image.alpha_composite(background, overlay)
-        draw = ImageDraw.Draw(background)
-        
-        # 加载字体
         try:
-            font_path = os.path.join(self.data_dir, "fonts", "千图马克手写体.ttf")
-            if not os.path.exists(font_path):
-                font_path = os.path.join(self.data_dir, "fonts", "1.ttf")
-            
-            font_large = ImageFont.truetype(font_path, 72)
-            font_medium = ImageFont.truetype(font_path, 28)
-            font_small = ImageFont.truetype(font_path, 28)
-            font_tiny = ImageFont.truetype(font_path, 22)
-        except (OSError, FileNotFoundError) as e:
-            logger.warning(f"加载字体失败，使用默认字体: {e}")
-            font_large = ImageFont.load_default()
-            font_medium = ImageFont.load_default()
-            font_small = ImageFont.load_default()
-            font_tiny = ImageFont.load_default()
-        
-        fortune = fortune_data["fortune"]
-        lucky_color = fortune_data["lucky_color"]
-        lucky_number = fortune_data["lucky_number"]
-        advice = fortune_data["advice"]
-        luck_value = fortune_data["luck_value"]
-        
-        fortune_color = fortune["color"]
-        if isinstance(fortune_color, list):
-            fortune_color = tuple(fortune_color)
-        
-        content_start_y = target_height - 520
-        
-        avatar_size = 150
-        avatar_x = 50
-        avatar_y = content_start_y
-        
-        if avatar:
-            circle_avatar = ImageUtils.make_circle_image(avatar, (avatar_size, avatar_size))
-            bordered_avatar = ImageUtils.add_avatar_border(circle_avatar, 5, (255, 255, 255))
-            background.paste(bordered_avatar, (avatar_x, avatar_y), bordered_avatar)
-        
-        name_x = avatar_x + avatar_size + 30
-        name_y = avatar_y + 20
-        draw.text((name_x, name_y), user_name, fill=(255, 255, 255), font=font_medium)
-        
-        date_str = datetime.now().strftime("%Y年%m月%d日")
-        draw.text((name_x, name_y + 70), date_str, fill=(200, 200, 200), font=font_small)
-        
-        fortune_level = fortune["level"]
-        
-        bbox = draw.textbbox((0, 0), fortune_level, font=font_large)
-        level_width = bbox[2] - bbox[0]
-        level_x = target_width - level_width - 50
-        level_y = content_start_y + 20
-        
-        draw.text((level_x + 4, level_y + 4), fortune_level, fill=(0, 0, 0, 128), font=font_large)
-        draw.text((level_x, level_y), fortune_level, fill=fortune_color, font=font_large)
-        
-        desc_y = content_start_y + 180
-        draw.text((50, desc_y), f"「{fortune['desc']}」", fill=(255, 255, 255), font=font_medium)
-        
-        bar_y = desc_y + 80
-        bar_width = 400
-        bar_height = 30
-        bar_x = 50
-        
-        draw.text((bar_x, bar_y), f"幸运指数：{luck_value}%", fill=(200, 200, 200), font=font_small)
-        
-        bar_bg_y = bar_y + 55
-        draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + bar_width, bar_bg_y + bar_height)],
-                               radius=bar_height // 2, fill=(80, 80, 80))
-        
-        progress_width = int(bar_width * luck_value / 100)
-        if progress_width > 0:
-            draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + progress_width, bar_bg_y + bar_height)],
-                                   radius=bar_height // 2, fill=fortune_color)
-        
-        tips_y = bar_bg_y + 55
-        lucky_color_hex = lucky_color['hex'].upper()
-        lucky_color_name = lucky_color['name']
-        color_text = f"幸运色：{lucky_color_name}({lucky_color_hex})"
-        
-        color_block_size = 36
-        color_block_x = 50
-        color_block_y = tips_y
-        
-        draw.rounded_rectangle(
-            [(color_block_x, color_block_y),
-             (color_block_x + color_block_size, color_block_y + color_block_size)],
-            radius=8,
-            fill=tuple(lucky_color['rgb'])
-        )
+            resized = cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        finally:
+            cropped.close()
 
-        text_x = color_block_x + color_block_size + 10
-        draw.text((text_x, tips_y), color_text, fill=(180, 180, 180), font=font_small)
+        if save_background_path:
+            rgb_for_save = resized.convert('RGB') if resized.mode != 'RGB' else None
+            try:
+                (rgb_for_save or resized).save(save_background_path, format="JPEG", quality=95)
+            except Exception as e:
+                logger.warning(f"缓存上次背景图失败: {e}")
+            finally:
+                if rgb_for_save is not None:
+                    rgb_for_save.close()
+
+        rgba_bg = resized.convert('RGBA') if resized.mode != 'RGBA' else resized
+        if rgba_bg is not resized:
+            resized.close()
         
-        lucky_number_text = f"|  幸运数字：{lucky_number}"
-        lucky_number_x = text_x + draw.textlength(color_text, font=font_small) + 10
-        draw.text((lucky_number_x, tips_y), lucky_number_text,
-                 fill=(180, 180, 180), font=font_small)
-        
-        draw.text((50, tips_y + 55), advice, fill=(180, 180, 180), font=font_small)
-        
-        footer_text = "仅供娱乐 · 相信科学 · 请勿迷信"
-        if addition_text:
-            footer_text = f"{addition_text} | {footer_text}"
+        # 底部半透明渐变遮罩（使用 1x600 渐变条拉伸替代 600 次逐行绘制）
+        gradient_height = 600
+        alpha_strip = Image.new('L', (1, gradient_height))
+        alpha_strip.putdata(
+            [int(200 * y / gradient_height) for y in range(gradient_height)]
+        )
+        alpha_mask = alpha_strip.resize((target_width, gradient_height), Image.Resampling.NEAREST)
+        alpha_strip.close()
+        overlay = Image.new('RGBA', (target_width, target_height), (0, 0, 0, 0))
+        black_block = Image.new('RGBA', (target_width, gradient_height), (0, 0, 0, 255))
+        try:
+            overlay.paste(black_block, (0, target_height - gradient_height), alpha_mask)
+            canvas = Image.alpha_composite(rgba_bg, overlay)
+        finally:
+            black_block.close()
+            alpha_mask.close()
+            overlay.close()
+            rgba_bg.close()
+
+        try:
+            draw = ImageDraw.Draw(canvas)
             
-        bbox = draw.textbbox((0, 0), footer_text, font=font_tiny)
-        footer_width = bbox[2] - bbox[0]
-        footer_x = (target_width - footer_width) // 2
-        draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
-        
-        return background.convert('RGB')
+            # 按需加载字体（合并相同的 28 号字体，减少 1 份 16.7 MiB 字体实例）
+            try:
+                font_path = os.path.join(self.data_dir, "fonts", "千图马克手写体.ttf")
+                if not os.path.exists(font_path):
+                    font_path = os.path.join(self.data_dir, "fonts", "1.ttf")
+                
+                font_large = ImageFont.truetype(font_path, 72)
+                font_medium = ImageFont.truetype(font_path, 28)
+                font_small = font_medium
+                font_tiny = ImageFont.truetype(font_path, 22)
+            except (OSError, FileNotFoundError) as e:
+                logger.warning(f"加载字体失败，使用默认字体: {e}")
+                font_large = ImageFont.load_default()
+                font_medium = ImageFont.load_default()
+                font_small = font_medium
+                font_tiny = ImageFont.load_default()
+            
+            fortune = fortune_data["fortune"]
+            lucky_color = fortune_data["lucky_color"]
+            lucky_number = fortune_data["lucky_number"]
+            advice = fortune_data["advice"]
+            luck_value = fortune_data["luck_value"]
+            
+            fortune_color = fortune["color"]
+            if isinstance(fortune_color, list):
+                fortune_color = tuple(fortune_color)
+            
+            content_start_y = target_height - 520
+            
+            avatar_size = 150
+            avatar_x = 50
+            avatar_y = content_start_y
+            
+            if avatar:
+                circle_avatar = ImageUtils.make_circle_image(avatar, (avatar_size, avatar_size))
+                try:
+                    bordered_avatar = ImageUtils.add_avatar_border(circle_avatar, 5, (255, 255, 255))
+                finally:
+                    circle_avatar.close()
+                try:
+                    canvas.paste(bordered_avatar, (avatar_x, avatar_y), bordered_avatar)
+                finally:
+                    bordered_avatar.close()
+            
+            name_x = avatar_x + avatar_size + 30
+            name_y = avatar_y + 20
+            draw.text((name_x, name_y), user_name, fill=(255, 255, 255), font=font_medium)
+            
+            date_str = datetime.now().strftime("%Y年%m月%d日")
+            draw.text((name_x, name_y + 70), date_str, fill=(200, 200, 200), font=font_small)
+            
+            fortune_level = fortune["level"]
+            
+            bbox = draw.textbbox((0, 0), fortune_level, font=font_large)
+            level_width = bbox[2] - bbox[0]
+            level_x = target_width - level_width - 50
+            level_y = content_start_y + 20
+            
+            draw.text((level_x + 4, level_y + 4), fortune_level, fill=(0, 0, 0, 128), font=font_large)
+            draw.text((level_x, level_y), fortune_level, fill=fortune_color, font=font_large)
+            
+            desc_y = content_start_y + 180
+            draw.text((50, desc_y), f"「{fortune['desc']}」", fill=(255, 255, 255), font=font_medium)
+            
+            bar_y = desc_y + 80
+            bar_width = 400
+            bar_height = 30
+            bar_x = 50
+            
+            draw.text((bar_x, bar_y), f"幸运指数：{luck_value}%", fill=(200, 200, 200), font=font_small)
+            
+            bar_bg_y = bar_y + 55
+            draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + bar_width, bar_bg_y + bar_height)],
+                                   radius=bar_height // 2, fill=(80, 80, 80))
+            
+            progress_width = int(bar_width * luck_value / 100)
+            if progress_width > 0:
+                draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + progress_width, bar_bg_y + bar_height)],
+                                       radius=bar_height // 2, fill=fortune_color)
+            
+            tips_y = bar_bg_y + 55
+            lucky_color_hex = lucky_color['hex'].upper()
+            lucky_color_name = lucky_color['name']
+            color_text = f"幸运色：{lucky_color_name}({lucky_color_hex})"
+            
+            color_block_size = 36
+            color_block_x = 50
+            color_block_y = tips_y
+            
+            draw.rounded_rectangle(
+                [(color_block_x, color_block_y),
+                 (color_block_x + color_block_size, color_block_y + color_block_size)],
+                radius=8,
+                fill=tuple(lucky_color['rgb'])
+            )
+
+            text_x = color_block_x + color_block_size + 10
+            draw.text((text_x, tips_y), color_text, fill=(180, 180, 180), font=font_small)
+            
+            lucky_number_text = f"|  幸运数字：{lucky_number}"
+            lucky_number_x = text_x + draw.textlength(color_text, font=font_small) + 10
+            draw.text((lucky_number_x, tips_y), lucky_number_text,
+                     fill=(180, 180, 180), font=font_small)
+            
+            draw.text((50, tips_y + 55), advice, fill=(180, 180, 180), font=font_small)
+            
+            footer_text = "仅供娱乐 · 相信科学 · 请勿迷信"
+            if addition_text:
+                footer_text = f"{addition_text} | {footer_text}"
+                
+            bbox = draw.textbbox((0, 0), footer_text, font=font_tiny)
+            footer_width = bbox[2] - bbox[0]
+            footer_x = (target_width - footer_width) // 2
+            draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
+            
+            return canvas.convert('RGB')
+        finally:
+            canvas.close()

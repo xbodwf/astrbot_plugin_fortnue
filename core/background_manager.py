@@ -1,4 +1,5 @@
 """背景图片管理模块"""
+import contextlib
 import random
 import aiohttp
 import asyncio
@@ -12,10 +13,13 @@ from ..utils.http_utils import HttpUtils
 class BackgroundManager:
     """背景图片管理器"""
     
-    def __init__(self, backgrounds_data: dict, config: dict, proxy: str = None):
+    def __init__(self, backgrounds_data: dict, config: dict, proxy: str = None,
+                 session: aiohttp.ClientSession | None = None):
         self.backgrounds_data = backgrounds_data
         self.config = config
         self.proxy = proxy
+        self.session = session
+)
     
     def _get_ignored_sources(self) -> list:
         """从配置获取忽略的图源列表"""
@@ -171,8 +175,13 @@ class BackgroundManager:
         }
         req_headers = {**base_headers, **headers} if isinstance(headers, dict) else base_headers
         
+        session_cm = (
+            contextlib.nullcontext(self.session)
+            if self.session is not None and not self.session.closed
+            else aiohttp.ClientSession()
+        )
         try:
-            async with aiohttp.ClientSession() as session:
+            async with session_cm as session:
                 async with session.request(method.upper(), url,
                                          timeout=aiohttp.ClientTimeout(total=timeout),
                                          headers=req_headers,
@@ -184,6 +193,7 @@ class BackgroundManager:
                         data = await resp.read()
                         try:
                             img = Image.open(BytesIO(data))
+                            img.load()
                         except Exception as e:
                             raise Exception(f"API返回的图片解析失败: {e}")
                         
@@ -275,7 +285,13 @@ class BackgroundManager:
             spec_type = bg_spec.get("type", "api")
             if spec_type == "object":
                 img_url, addition_text, img_headers = await self._resolve_object_image(bg_spec)
-                background = await HttpUtils.download_image(img_url, headers=img_headers, proxy=self.proxy)
+                background = await HttpUtils.download_image(
+                    img_url,
+                    headers=img_headers,
+                    proxy=self.proxy,
+                    session=self.session,
+                )
+)
             else:
                 resolved, addition_text, img_headers = await self._resolve_api_image_url(bg_spec)
                 if isinstance(resolved, Image.Image):
@@ -283,12 +299,23 @@ class BackgroundManager:
                 else:
                     bg_url = resolved
                     logger.info(f"选取背景图片URL: {bg_url}")
-                    background = await HttpUtils.download_image(bg_url, headers=img_headers, proxy=self.proxy)
+                    background = await HttpUtils.download_image(
+                        bg_url,
+                        headers=img_headers,
+                        proxy=self.proxy,
+                        session=self.session,
+                    )
         else:
             bg_url = bg_spec
             if bg_url.startswith("http"):
-                background = await HttpUtils.download_image(bg_url, proxy=self.proxy)
+                background = await HttpUtils.download_image(
+                    bg_url,
+                    proxy=self.proxy,
+                    session=self.session,
+                )
+)
             else:
                 background = Image.open(bg_url)
+                background.load()
                 
         return background, addition_text
