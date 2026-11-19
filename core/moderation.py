@@ -309,10 +309,8 @@ REJECT
             - message: 状态描述
             - bboxes: 需要打码的区域列表（仅在打码模式下有值）
         """
-        logger.info(f"[图片审查] 开始审查，配置: {self.config}")
-
         if not self.is_enabled():
-            logger.info("[图片审查] 审查未启用")
+            logger.debug("[图片审查] 审查未启用")
             return True, "审查未启用", []
 
         provider_type = self.config.get("provider_type", "builtin")

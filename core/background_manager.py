@@ -5,9 +5,12 @@ import aiohttp
 import asyncio
 import re
 from PIL import Image
-from io import BytesIO
 from astrbot.api import logger
-from ..utils.http_utils import HttpUtils
+from ..utils.http_utils import (
+    HttpUtils,
+    decode_image_bytes,
+    read_response_bytes_limited,
+)
 
 
 class BackgroundManager:
@@ -190,10 +193,9 @@ class BackgroundManager:
                         raise Exception(f"API请求失败 (HTTP {resp.status} {resp.reason})")
                     
                     if expected == "image":
-                        data = await resp.read()
+                        data = await read_response_bytes_limited(resp)
                         try:
-                            img = Image.open(BytesIO(data))
-                            img.load()
+                            img = await asyncio.to_thread(decode_image_bytes, data)
                         except Exception as e:
                             raise Exception(f"API返回的图片解析失败: {e}")
                         

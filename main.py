@@ -3,14 +3,15 @@
 生成精美的运势图片
 """
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, llm_tool
 import asyncio
 from collections import OrderedDict
 import contextlib
-import hashlib
+from io import BytesIO
 import os
 import tempfile
+import weakref
 from datetime import datetime
 import aiohttp
 
@@ -19,6 +20,8 @@ from .core import BackgroundManager, FortuneGenerator, ImageModerator
 from .utils import ImageUtils
 
 _MAX_LAST_BACKGROUNDS = 20
+_MAX_LAST_BACKGROUND_BYTES = 6 * 1024 * 1024  # 6 MiB total cap across cached JPEGs
+_MAX_CONCURRENT_RENDERS = 2
 
 
 @register("astrbot_plugin_fortnue", "Xbodw", "今日运势生成器 - 生成一张二次元风格的运势图片", "2.1.0")
@@ -37,13 +40,22 @@ class FortunePlugin(Star):
         # 初始化各模块
         self.fortune_generator = FortuneGenerator(self.data_dir)
         self._http_session: aiohttp.ClientSession | None = None
+        self._render_semaphores: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, asyncio.Semaphore
+        ] = weakref.WeakKeyDictionary()
 
-        # 上次背景图磁盘缓存（有上限 LRU，内存仅保存文件路径，不再常驻解码后的 PIL.Image）
-        self._last_bg_dir = StarTools.get_data_dir("astrbot_plugin_fortnue") / "last_backgrounds"
-        self._last_bg_dir.mkdir(parents=True, exist_ok=True)
-        self.user_last_backgrounds: OrderedDict[str, str] = OrderedDict()
+        # 上次背景图有界 JPEG 字节缓存（按条目数与总字节数双限制，出图成功后再提交）
+        self.user_last_backgrounds: OrderedDict[str, bytes] = OrderedDict()
+        self._last_bg_total_bytes: int = 0
 
         logger.debug("[插件初始化] FortunePlugin 初始化完成")
+
+    def _get_render_semaphore(self) -> asyncio.Semaphore:
+        """获取绑定到当前事件循环的渲染并发信号量。"""
+        loop = asyncio.get_running_loop()
+        return self._render_semaphores.setdefault(
+            loop, asyncio.Semaphore(_MAX_CONCURRENT_RENDERS)
+        )
 
     def _get_http_session(self) -> aiohttp.ClientSession:
         """惰性创建并复用插件级 aiohttp 会话。"""
@@ -59,23 +71,28 @@ class FortunePlugin(Star):
         return self._http_session
 
     async def terminate(self):
-        """插件卸载时关闭共享 HTTP 会话。"""
+        """插件卸载时关闭共享 HTTP 会话并释放缓存。"""
         if self._http_session is not None and not self._http_session.closed:
             await self._http_session.close()
         self._http_session = None
+        self.user_last_backgrounds.clear()
+        self._last_bg_total_bytes = 0
 
-    def _prepare_last_background_path(self, user_id: str) -> str:
-        """分配并维护有上限的最近背景图缓存路径。"""
-        digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:16]
-        target_path = str(self._last_bg_dir / f"{digest}.jpg")
-        self.user_last_backgrounds[user_id] = target_path
-        self.user_last_backgrounds.move_to_end(user_id)
-        while len(self.user_last_backgrounds) > _MAX_LAST_BACKGROUNDS:
-            _, evicted_path = self.user_last_backgrounds.popitem(last=False)
-            if evicted_path != target_path:
-                with contextlib.suppress(OSError):
-                    os.remove(evicted_path)
-        return target_path
+    def _store_last_background(self, user_id: str, jpeg_bytes: bytes) -> None:
+        """出图成功后原子更新有界 JPEG 字节缓存。"""
+        if not jpeg_bytes or len(jpeg_bytes) > _MAX_LAST_BACKGROUND_BYTES:
+            return
+        previous = self.user_last_backgrounds.pop(user_id, None)
+        if previous is not None:
+            self._last_bg_total_bytes -= len(previous)
+        self.user_last_backgrounds[user_id] = jpeg_bytes
+        self._last_bg_total_bytes += len(jpeg_bytes)
+        while (
+            len(self.user_last_backgrounds) > _MAX_LAST_BACKGROUNDS
+            or self._last_bg_total_bytes > _MAX_LAST_BACKGROUND_BYTES
+        ):
+            _, evicted = self.user_last_backgrounds.popitem(last=False)
+            self._last_bg_total_bytes -= len(evicted)
     
     def _get_source_name_from_spec(self, bg_spec, bg_manager) -> str | None:
         """从背景规格中提取图源名称
@@ -238,19 +255,33 @@ class FortunePlugin(Star):
                 else:
                     logger.info("[运势生成] 图片审查未启用")
                 
-                def _render_none_to_file(src_bg) -> str:
-                    result_image = ImageUtils.process_background(src_bg)
+                def _render_none_to_bytes(src_bg) -> bytes:
                     try:
-                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                            result_image.save(f, format="JPEG", quality=95)
-                            return f.name
+                        result_image = ImageUtils.process_background(src_bg)
+                        buf = BytesIO()
+                        try:
+                            result_image.save(buf, format="JPEG", quality=95)
+                            return buf.getvalue()
+                        finally:
+                            buf.close()
+                            result_image.close()
                     finally:
-                        result_image.close()
+                        src_bg.close()
 
+                transferred_to_worker = False
                 try:
-                    temp_path = await asyncio.to_thread(_render_none_to_file, background)
+                    async with self._get_render_semaphore():
+                        transferred_to_worker = True
+                        jpeg_bytes = await asyncio.to_thread(
+                            _render_none_to_bytes, background
+                        )
                 finally:
-                    background.close()
+                    if not transferred_to_worker:
+                        background.close()
+
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                    f.write(jpeg_bytes)
+                    temp_path = f.name
                 
                 try:
                     yield event.image_result(temp_path)
@@ -354,44 +385,62 @@ class FortunePlugin(Star):
                 # 获取头像
                 avatar_url = await self._get_avatar_url(event)
                 avatar = None
+                transferred_to_worker = False
                 try:
-                    from .utils import HttpUtils
-                    avatar = await HttpUtils.download_image(
-                        avatar_url,
-                        timeout=10,
-                        proxy=self._get_proxy(),
-                        session=self._get_http_session(),
-                    )
-                except Exception as e:
-                    logger.warning(f"下载头像失败: {e}，将使用默认空白头像")
-                    from PIL import Image
-                    avatar = Image.new('RGB', (100, 100), (200, 200, 200))
-
-                fortune_data = self.fortune_generator.get_fortune_for_user(user_id)
-                last_bg_path = self._prepare_last_background_path(user_id)
-
-                def _render_fortune_to_file() -> str:
-                    result_image = self.fortune_generator.create_fortune_image(
-                        background,
-                        avatar,
-                        user_name,
-                        fortune_data,
-                        addition_text,
-                        save_background_path=last_bg_path,
-                    )
                     try:
-                        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                            result_image.save(f, format="JPEG", quality=90)
-                            return f.name
-                    finally:
-                        result_image.close()
+                        from .utils import HttpUtils
+                        avatar = await HttpUtils.download_image(
+                            avatar_url,
+                            timeout=10,
+                            proxy=self._get_proxy(),
+                            session=self._get_http_session(),
+                        )
+                    except Exception as e:
+                        logger.warning(f"下载头像失败: {e}，将使用默认空白头像")
+                        from PIL import Image
+                        avatar = Image.new('RGB', (100, 100), (200, 200, 200))
 
-                try:
-                    temp_path = await asyncio.to_thread(_render_fortune_to_file)
+                    fortune_data = self.fortune_generator.get_fortune_for_user(user_id)
+
+                    def _render_fortune_to_bytes(src_bg, src_avatar) -> tuple[bytes, bytes]:
+                        try:
+                            result_image, bg_bytes = self.fortune_generator.create_fortune_image(
+                                src_bg,
+                                src_avatar,
+                                user_name,
+                                fortune_data,
+                                addition_text,
+                                return_background_bytes=True,
+                            )
+                            buf = BytesIO()
+                            try:
+                                result_image.save(buf, format="JPEG", quality=90)
+                                return buf.getvalue(), bg_bytes
+                            finally:
+                                buf.close()
+                                result_image.close()
+                        finally:
+                            src_bg.close()
+                            if src_avatar is not None:
+                                src_avatar.close()
+
+                    async with self._get_render_semaphore():
+                        transferred_to_worker = True
+                        result_bytes, bg_bytes = await asyncio.to_thread(
+                            _render_fortune_to_bytes, background, avatar
+                        )
                 finally:
-                    background.close()
-                    if avatar is not None:
-                        avatar.close()
+                    if not transferred_to_worker:
+                        background.close()
+                        if avatar is not None:
+                            avatar.close()
+
+                # 出图成功后才原子更新 /last 缓存，避免并发覆写或失败污染
+                self._store_last_background(user_id, bg_bytes)
+
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                    f.write(result_bytes)
+                    temp_path = f.name
 
                 try:
                     yield event.image_result(temp_path)
@@ -450,18 +499,25 @@ class FortunePlugin(Star):
     async def last(self, event: AstrMessageEvent):
         """获取上一次今日运势的原始背景图片（无运势信息）"""
         user_id = event.get_sender_id()
-        last_bg_path = self.user_last_backgrounds.get(user_id)
-        if not last_bg_path or not os.path.exists(last_bg_path):
-            self.user_last_backgrounds.pop(user_id, None)
+        bg_bytes = self.user_last_backgrounds.get(user_id)
+        if not bg_bytes:
             yield event.plain_result("你还没有生成过今日运势，请先使用 /jrys 生成一次~")
             return
             
+        temp_path = None
         try:
             self.user_last_backgrounds.move_to_end(user_id)
-            yield event.image_result(last_bg_path)
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                f.write(bg_bytes)
+                temp_path = f.name
+            yield event.image_result(temp_path)
         except Exception as e:
             logger.error(f"获取上次背景图片失败: {e}")
             yield event.plain_result(f"获取失败: {e}")
+        finally:
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    os.remove(temp_path)
 
     @jrysl.command("restore")
     async def restore(self, event: AstrMessageEvent):

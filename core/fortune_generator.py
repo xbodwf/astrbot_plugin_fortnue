@@ -3,6 +3,7 @@ import random
 import json
 import os
 from datetime import datetime
+from io import BytesIO
 from astrbot.api import logger
 from astrbot.api.star import StarTools
 from PIL import Image, ImageDraw, ImageFont
@@ -155,7 +156,7 @@ class FortuneGenerator:
     
     def create_fortune_image(self, background: Image.Image, avatar: Image.Image | None,
                              user_name: str, fortune_data: dict, addition_text: str = "",
-                             save_background_path: str | None = None) -> Image.Image:
+                             return_background_bytes: bool = False) -> Image.Image | tuple[Image.Image, bytes]:
         """创建运势图片"""
         target_width = 800
         target_height = 1200
@@ -178,13 +179,15 @@ class FortuneGenerator:
         finally:
             cropped.close()
 
-        if save_background_path:
+        bg_jpeg_bytes = b""
+        if return_background_bytes:
             rgb_for_save = resized.convert('RGB') if resized.mode != 'RGB' else None
+            buf = BytesIO()
             try:
-                (rgb_for_save or resized).save(save_background_path, format="JPEG", quality=95)
-            except Exception as e:
-                logger.warning(f"缓存上次背景图失败: {e}")
+                (rgb_for_save or resized).save(buf, format="JPEG", quality=95)
+                bg_jpeg_bytes = buf.getvalue()
             finally:
+                buf.close()
                 if rgb_for_save is not None:
                     rgb_for_save.close()
 
@@ -329,6 +332,9 @@ class FortuneGenerator:
             footer_x = (target_width - footer_width) // 2
             draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
             
-            return canvas.convert('RGB')
+            result = canvas.convert('RGB')
+            if return_background_bytes:
+                return result, bg_jpeg_bytes
+            return result
         finally:
             canvas.close()
