@@ -9,6 +9,7 @@ from astrbot.api import logger
 from ..utils.http_utils import (
     HttpUtils,
     decode_image_bytes,
+    load_local_image,
     read_response_bytes_limited,
 )
 
@@ -314,7 +315,6 @@ class BackgroundManager:
                     session=self.session,
                 )
             else:
-                background = Image.open(bg_url)
-                background.load()
+                background = await load_local_image(bg_url)
                 
         return background, addition_text

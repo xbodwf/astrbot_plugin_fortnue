@@ -60,6 +60,28 @@ def decode_image_bytes(
         raise Exception(f"图片格式解析失败: {exc}") from exc
 
 
+def decode_image_file(
+    path: str,
+    max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> Image.Image:
+    """按体积与像素上限读取并解码本地图片文件。"""
+    with open(path, "rb") as f:
+        data = f.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"图片体积超过限制 (> {max_bytes} bytes)")
+    return decode_image_bytes(data, max_pixels=max_pixels)
+
+
+async def load_local_image(
+    path: str,
+    max_bytes: int = MAX_IMAGE_DOWNLOAD_BYTES,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> Image.Image:
+    """在工作线程中按统一预算加载本地图片，避免阻塞事件循环。"""
+    return await asyncio.to_thread(decode_image_file, path, max_bytes, max_pixels)
+
+
 class HttpUtils:
     """HTTP请求工具类"""
     
