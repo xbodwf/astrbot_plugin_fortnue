@@ -1,4 +1,8 @@
 """图片审查模块"""
+import asyncio
+import base64
+import contextlib
+from io import BytesIO
 import aiohttp
 import os
 import tempfile
@@ -6,7 +10,8 @@ import json
 import re
 from PIL import Image
 from astrbot.api import logger
-from ..utils.image_utils import ImageUtils
+
+_MODERATION_MAX_SIDE = 1024
 
 
 class ImageModerator:
@@ -49,10 +54,12 @@ REJECT
 其中坐标为相对坐标（0到1之间的小数），(x1, y1) 为左上角，(x2, y2) 为右下角。
 仅标记真正需要遮挡的私密区域，不要过度标记。"""
     
-    def __init__(self, config: dict, context=None, proxy: str = None):
+    def __init__(self, config: dict, context=None, proxy: str = None,
+                 session: aiohttp.ClientSession | None = None):
         self.config = config
         self.context = context
         self.proxy = proxy
+        self.session = session
     
     def get_moderation_prompt(self) -> str:
         """获取审查提示词"""
@@ -158,6 +165,81 @@ REJECT
         else:
             return str(response)
     
+    @staticmethod
+    def _prepare_moderation_jpeg(
+        img: Image.Image,
+        max_side: int = _MODERATION_MAX_SIDE,
+    ) -> tuple[bytes, tuple[int, int]]:
+        """在工作线程中先用 BILINEAR 缩图再转码为 JPEG 字节，避免 4K 整图拷贝与 LANCZOS 开销。"""
+        from ..utils.image_utils import ImageUtils
+
+        width, height = img.size
+        longest = max(width, height)
+        resized = None
+        if longest > max_side:
+            scale = max_side / longest
+            new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            resized = img.resize(new_size, Image.Resampling.BILINEAR)
+            src = resized
+        else:
+            src = img
+
+        flattened = None
+        try:
+            if src.mode in ('RGBA', 'LA', 'P'):
+                rgba = src.convert('RGBA') if src.mode != 'RGBA' else None
+                rgba_src = rgba or src
+                flattened = Image.new('RGB', rgba_src.size, (255, 255, 255))
+                try:
+                    flattened.paste(rgba_src, mask=rgba_src.split()[-1])
+                finally:
+                    if rgba is not None:
+                        rgba.close()
+                target = flattened
+            else:
+                target = src
+
+            return ImageUtils.encode_jpeg(target, quality=85), target.size
+        finally:
+            if flattened is not None:
+                flattened.close()
+            if resized is not None:
+                resized.close()
+
+    def _evaluate_moderation_text(
+        self,
+        result_text: str,
+        preview_size: tuple[int, int],
+    ) -> tuple:
+        """统一解析审查模型的 PASS/REJECT 与马赛克坐标（并归一化像素坐标）。"""
+        result_upper = result_text.strip().upper()
+        if "PASS" in result_upper:
+            logger.info("[图片审查] 审查通过")
+            return True, "审查通过", []
+        if "REJECT" in result_upper:
+            raw_bboxes = self._parse_bboxes(result_text)
+            preview_w, preview_h = preview_size
+            normalized_bboxes = []
+            for x1, y1, x2, y2 in raw_bboxes:
+                if all(0 <= v <= 1 for v in (x1, y1, x2, y2)):
+                    normalized_bboxes.append((x1, y1, x2, y2))
+                elif preview_w > 0 and preview_h > 0:
+                    normalized_bboxes.append(
+                        (
+                            max(0.0, min(1.0, x1 / preview_w)),
+                            max(0.0, min(1.0, y1 / preview_h)),
+                            max(0.0, min(1.0, x2 / preview_w)),
+                            max(0.0, min(1.0, y2 / preview_h)),
+                        )
+                    )
+            if normalized_bboxes:
+                logger.warning(f"[图片审查] 图片不适宜，检测到 {len(normalized_bboxes)} 个区域需要打码")
+                return False, "图片内容不适宜", normalized_bboxes
+            logger.warning(f"[图片审查] 图片被拒绝: {result_text}")
+            return False, "图片内容不适宜", []
+        logger.warning(f"[图片审查] 审查结果无法解析: {result_text}")
+        return True, f"审查结果未知: {result_text}", []
+
     async def moderate_with_builtin(self, img: Image.Image, provider_id: str, 
                                      prompt: str = None) -> tuple:
         """使用 AstrBot 内置提供商进行图片审查"""
@@ -169,7 +251,6 @@ REJECT
                 logger.error("[图片审查] 无上下文，无法使用内置提供商")
                 return True, "无上下文，无法使用内置提供商", []
 
-            # 使用 context.get_provider_by_id() 获取提供商
             provider = self.context.get_provider_by_id(provider_id)
             if not provider:
                 logger.error(f"[图片审查] 未找到提供商: {provider_id}")
@@ -177,84 +258,44 @@ REJECT
 
             logger.info(f"[图片审查] 找到提供商: {provider.meta().id}")
 
-            # 保存图片到临时文件
+            jpeg_bytes, preview_size = await asyncio.to_thread(
+                self._prepare_moderation_jpeg, img
+            )
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                # 如果图片有透明通道，转换为 RGB
-                if img.mode in ('RGBA', 'LA', 'P'):
-                    # 创建白色背景
-                    background = Image.new('RGB', img.size, (255, 255, 255))
-                    if img.mode == 'P':
-                        img = img.convert('RGBA')
-                    background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
-                    img = background
-                elif img.mode != 'RGB':
-                    img = img.convert('RGB')
-
-                img.save(f, format="JPEG", quality=95)
+                f.write(jpeg_bytes)
                 temp_path = f.name
 
-            logger.info(f"[图片审查] 图片已保存到临时文件: {temp_path}")
-
-            # 使用传入的提示词或默认提示词
             use_prompt = prompt or self.get_moderation_prompt()
-
-            logger.info(f"[图片审查] 发送审查请求到提供商...")
-
-            # 使用 text_chat 方法，传入图片文件路径
             response = await provider.text_chat(
                 prompt=use_prompt,
                 image_urls=[temp_path]
             )
-
-            logger.info(f"[图片审查] 收到响应: {response}")
-
-            # 提取响应内容
             result = self._extract_json_from_response(response)
-            result_upper = result.strip().upper()
-
-            if "PASS" in result_upper:
-                logger.info("[图片审查] 审查通过")
-                return True, "审查通过", []
-            elif "REJECT" in result_upper:
-                # 尝试解析边界框坐标
-                bboxes = self._parse_bboxes(result)
-                if bboxes:
-                    logger.warning(f"[图片审查] 图片不适宜，检测到 {len(bboxes)} 个区域需要打码")
-                    return False, "图片内容不适宜", bboxes
-                else:
-                    logger.warning(f"[图片审查] 图片被拒绝: {result}")
-                    return False, "图片内容不适宜", []
-            else:
-                logger.warning(f"[图片审查] 审查结果无法解析: {result}")
-                return True, f"审查结果未知: {result}", []
+            return self._evaluate_moderation_text(result, preview_size)
 
         except Exception as e:
             logger.error(f"[图片审查] 内置提供商审查失败: {e}", exc_info=True)
             return True, f"审查出错: {e}", []
         finally:
-            # 清理临时文件
             if temp_path and os.path.exists(temp_path):
-                try:
+                with contextlib.suppress(OSError):
                     os.remove(temp_path)
-                    logger.debug(f"[图片审查] 已删除临时文件: {temp_path}")
-                except Exception as e:
-                    logger.warning(f"[图片审查] 删除临时文件失败: {e}")
     
     async def moderate_with_openai(self, img: Image.Image, api_key: str, 
                                     api_base: str, model: str,
                                     prompt: str = None) -> tuple:
         """使用 OpenAI Compatible API 进行图片审查"""
         try:
-            img_base64 = ImageUtils.image_to_base64(img)
+            jpeg_bytes, preview_size = await asyncio.to_thread(
+                self._prepare_moderation_jpeg, img
+            )
+            img_base64 = base64.b64encode(jpeg_bytes).decode("utf-8")
             
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             }
-            
-            # 使用传入的提示词或默认提示词
             use_prompt = prompt or self.get_moderation_prompt()
-            
             payload = {
                 "model": model,
                 "messages": [
@@ -266,10 +307,15 @@ REJECT
                         ]
                     }
                 ],
-                "max_tokens": 200  # 增加以容纳坐标输出
+                "max_tokens": 200
             }
             
-            async with aiohttp.ClientSession() as session:
+            session_cm = (
+                contextlib.nullcontext(self.session)
+                if self.session is not None and not self.session.closed
+                else aiohttp.ClientSession()
+            )
+            async with session_cm as session:
                 url = f"{api_base.rstrip('/')}/chat/completions"
                 async with session.post(url, json=payload, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=60),
@@ -280,21 +326,7 @@ REJECT
                     
                     data = await resp.json()
                     result = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    result_upper = result.strip().upper()
-                    
-                    if "PASS" in result_upper:
-                        return True, "审查通过", []
-                    elif "REJECT" in result_upper:
-                        # 尝试解析边界框坐标
-                        bboxes = self._parse_bboxes(result)
-                        if bboxes:
-                            logger.warning(f"[图片审查] 图片不适宜，检测到 {len(bboxes)} 个区域需要打码")
-                            return False, "图片内容不适宜", bboxes
-                        else:
-                            return False, "图片内容不适宜", []
-                    else:
-                        logger.warning(f"审查结果无法解析: {result}")
-                        return True, f"审查结果未知: {result}", []
+                    return self._evaluate_moderation_text(result, preview_size)
                         
         except Exception as e:
             logger.error(f"OpenAI Compatible API 审查失败: {e}")
@@ -309,10 +341,8 @@ REJECT
             - message: 状态描述
             - bboxes: 需要打码的区域列表（仅在打码模式下有值）
         """
-        logger.info(f"[图片审查] 开始审查，配置: {self.config}")
-
         if not self.is_enabled():
-            logger.info("[图片审查] 审查未启用")
+            logger.debug("[图片审查] 审查未启用")
             return True, "审查未启用", []
 
         provider_type = self.config.get("provider_type", "builtin")
