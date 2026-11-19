@@ -128,7 +128,13 @@
 
 在 AstrBot 管理面板或 `config.json` 中可以配置以下项：
 - `proxy`: 网络代理地址 (如 `http://127.0.0.1:7890`)。
+- `request_timeout`: 背景 API 与图片下载超时时间，默认 30 秒。
+- `background_retry_count`: 网络或解析失败后自动改换其他图源的次数，默认 3 次。
 - `image_quality`: 输出图片的 JPEG 质量 (1-100)。
+- `balance_by_image_count`: 默认开启。按每个静态图源去重后的图片数量分配图源权重，使所有静态图片等概率。
+- `source_weights`: 可选图源倍率。均衡模式下 `blue_archive:2` 表示其中每张图片是默认概率的 2 倍。
+
+> API 图源不会公开完整图库数量，因此无法严格计算“每张 API 图片”的概率。均衡模式会用静态图源的平均图片数作为 API 图源的虚拟权重，以保持 API 图源正常出现。
 
 # 变更日志
 请参阅 [CHANGELOG.md](CHANGELOG.md) 获取详细的更新历史。

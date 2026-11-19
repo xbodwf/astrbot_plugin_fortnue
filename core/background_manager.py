@@ -23,6 +23,10 @@ class BackgroundManager:
         self.config = config
         self.proxy = proxy
         self.session = session
+        try:
+            self.request_timeout = max(1.0, float(config.get("request_timeout", 30.0)))
+        except (TypeError, ValueError):
+            self.request_timeout = 30.0
     
     def _get_ignored_sources(self) -> list:
         """从配置获取忽略的图源列表"""
@@ -44,13 +48,73 @@ class BackgroundManager:
                     except ValueError:
                         pass
         return weights
+
+    @staticmethod
+    def _deduplicate_items(items: list) -> list:
+        """按图片 URL 去重并保持原有顺序。"""
+        unique_items = []
+        seen = set()
+
+        for item in items:
+            if isinstance(item, str):
+                key = ("url", item)
+            elif isinstance(item, dict) and isinstance(item.get("url"), str):
+                key = ("url", item["url"])
+            else:
+                key = ("value", repr(item))
+
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append(item)
+
+        return unique_items
+
+    def _get_unique_source_items(self, source) -> list:
+        """返回静态图源中去重后的候选项；API 图源返回空列表。"""
+        if isinstance(source, list):
+            return self._deduplicate_items(source)
+        if isinstance(source, str) and source:
+            return [source]
+        if not isinstance(source, dict):
+            return []
+
+        source_type = source.get("type")
+        if source_type == "array":
+            items = source.get("items") or source.get("urls") or []
+            return self._deduplicate_items(items) if isinstance(items, list) else []
+        if source_type == "object":
+            items = source.get("sources") or []
+            return self._deduplicate_items(items) if isinstance(items, list) else []
+        return []
+
+    def _calculate_choice_weights(self, choices: list, weights: dict) -> list:
+        """计算图源权重，使去重后的静态图片在图源之间保持等概率。"""
+        if not self.config.get("balance_by_image_count", True):
+            return [weights.get(choice, 1.0) for choice in choices]
+
+        item_counts = {
+            choice: len(self._get_unique_source_items(self.backgrounds_data.get(choice)))
+            for choice in choices
+        }
+        finite_counts = [count for count in item_counts.values() if count > 0]
+        api_virtual_weight = (
+            sum(finite_counts) / len(finite_counts) if finite_counts else 1.0
+        )
+
+        choice_weights = []
+        for choice in choices:
+            base_weight = item_counts[choice] or api_virtual_weight
+            multiplier = weights.get(choice, 1.0)
+            choice_weights.append(base_weight * multiplier)
+        return choice_weights
     
     def _weighted_choice(self, choices: list, weights: dict) -> str:
         """根据权重进行加权随机选择"""
         if not choices:
             return ""
         
-        choice_weights = [weights.get(choice, 1.0) for choice in choices]
+        choice_weights = self._calculate_choice_weights(choices, weights)
         total_weight = sum(choice_weights)
         
         if total_weight <= 0:
@@ -91,7 +155,12 @@ class BackgroundManager:
                 return None
         return cur
     
-    def get_background_spec(self, source_name: str = None, ignore_sources: bool = True) -> str | dict:
+    def get_background_spec(
+        self,
+        source_name: str = None,
+        ignore_sources: bool = True,
+        excluded_sources: set = None,
+    ) -> str | dict:
         """获取背景图片规格"""
         if not self.backgrounds_data:
             return ""
@@ -101,7 +170,7 @@ class BackgroundManager:
             if source_name in self.backgrounds_data:
                 chosen = self.backgrounds_data[source_name]
                 if isinstance(chosen, list) and len(chosen) > 0:
-                    return random.choice(chosen)
+                    return random.choice(self._deduplicate_items(chosen))
                 if isinstance(chosen, str) and chosen:
                     return chosen
                 if isinstance(chosen, dict):
@@ -109,7 +178,7 @@ class BackgroundManager:
                     if t == "array":
                         items = chosen.get("items") or chosen.get("urls") or []
                         if isinstance(items, list) and len(items) > 0:
-                            return random.choice(items)
+                            return random.choice(self._deduplicate_items(items))
                     if t == "api":
                         return chosen
                     if t == "object":
@@ -119,6 +188,8 @@ class BackgroundManager:
         # 随机选择
         ignored = self._get_ignored_sources() if ignore_sources else []
         ignored_set = set(ignored) if ignored else set()
+        if excluded_sources:
+            ignored_set.update(excluded_sources)
         source_weights = self._get_source_weights()
         
         source_keys = []
@@ -149,7 +220,7 @@ class BackgroundManager:
         chosen = self.backgrounds_data.get(chosen_key)
         
         if isinstance(chosen, list) and len(chosen) > 0:
-            return random.choice(chosen)
+            return random.choice(self._deduplicate_items(chosen))
         if isinstance(chosen, str) and chosen:
             return chosen
         if isinstance(chosen, dict):
@@ -157,7 +228,7 @@ class BackgroundManager:
             if t == "array":
                 items = chosen.get("items") or chosen.get("urls") or []
                 if isinstance(items, list) and len(items) > 0:
-                    return random.choice(items)
+                    return random.choice(self._deduplicate_items(items))
             if t == "api":
                 return chosen
             if t == "object":
@@ -251,7 +322,8 @@ class BackgroundManager:
         if not sources or not isinstance(sources, list):
             raise Exception("object 类型图源必须包含 sources 列表")
         
-        source = random.choice(sources)
+        unique_sources = self._deduplicate_items(sources)
+        source = random.choice(unique_sources)
         img_headers = spec.get("img_headers")
         addition_tmpl = spec.get("addition")
         
@@ -289,12 +361,15 @@ class BackgroundManager:
                 img_url, addition_text, img_headers = await self._resolve_object_image(bg_spec)
                 background = await HttpUtils.download_image(
                     img_url,
+                    timeout=self.request_timeout,
                     headers=img_headers,
                     proxy=self.proxy,
                     session=self.session,
                 )
             else:
-                resolved, addition_text, img_headers = await self._resolve_api_image_url(bg_spec)
+                resolved, addition_text, img_headers = await self._resolve_api_image_url(
+                    bg_spec, timeout=self.request_timeout
+                )
                 if isinstance(resolved, Image.Image):
                     background = resolved
                 else:
@@ -302,6 +377,7 @@ class BackgroundManager:
                     logger.info(f"选取背景图片URL: {bg_url}")
                     background = await HttpUtils.download_image(
                         bg_url,
+                        timeout=self.request_timeout,
                         headers=img_headers,
                         proxy=self.proxy,
                         session=self.session,
@@ -311,6 +387,7 @@ class BackgroundManager:
             if bg_url.startswith("http"):
                 background = await HttpUtils.download_image(
                     bg_url,
+                    timeout=self.request_timeout,
                     proxy=self.proxy,
                     session=self.session,
                 )

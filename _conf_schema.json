@@ -10,6 +10,12 @@
         "hint": "单位：秒，下载背景图片的最大等待时间",
         "default": 30.0
       },
+      "background_retry_count": {
+        "description": "背景图网络重试次数",
+        "type": "int",
+        "hint": "背景 API、图片下载或域名解析失败时自动改换其他图源的次数；显式指定图源时会重试同一图源",
+        "default": 3
+      },
       "proxy": {
         "description": "网络代理",
         "type": "string",
@@ -35,7 +41,7 @@
           "type": "string"
         },
         "hint": "使用 ^jrys 或 ^jrysn 时不会抽到这些图源。必须使用 ^jrysl 显式指定才能使用。填写图源名称（如 blue_archive）",
-        "default": ["pixiv"]
+        "default": ["pixiv", "sretna_pe", "alcy_mp", "alcy_moemp", "mwm-moe"]
       },
       "source_weights": {
         "description": "图源权重配置",
@@ -43,8 +49,14 @@
         "items": {
           "type": "string"
         },
-        "hint": "配置图源的抽取权重，格式为 \"图源名:权重\"。例如 [\"blue_archive:2\", \"genshin:1\"]。未配置权重的图源默认权重为 1。权重越高被抽中概率越大",
+        "hint": "配置图源的抽取倍率，格式为 \"图源名:权重\"。例如 [\"blue_archive:2\", \"genshin:1\"]。启用按图片数量均衡时，倍率 2 表示该图源内每张图片的概率为默认值的 2 倍",
         "default": []
+      },
+      "balance_by_image_count": {
+        "description": "按图片数量均衡概率",
+        "type": "bool",
+        "hint": "启用后自动按各静态图源去重后的图片数量分配图源权重，使不同静态图源中的每张图片等概率；API 图源使用静态图源平均规模作为虚拟权重",
+        "default": true
       }
     }
   },
