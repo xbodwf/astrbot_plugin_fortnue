@@ -4,6 +4,7 @@ import random
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime
 from io import BytesIO
 from astrbot.api import logger
@@ -31,6 +32,27 @@ class FortuneGenerator:
         self.yunshi_data_path = StarTools.get_data_dir("astrbot_plugin_fortnue") / "yunshi.json"
         self._fortune_data = self._load_fortune_data()
         self.user_fortune_data = self._load_yunshi_data()
+        self._font_lock = threading.Lock()
+        self._fonts: tuple | None = None
+
+    def _get_fonts(self) -> tuple:
+        """惰性加载并缓存字体实例（需在 _font_lock 保护下调用与绘制）。"""
+        if self._fonts is None:
+            try:
+                font_path = os.path.join(self.data_dir, "fonts", "千图马克手写体.ttf")
+                if not os.path.exists(font_path):
+                    font_path = os.path.join(self.data_dir, "fonts", "1.ttf")
+                font_large = ImageFont.truetype(font_path, 72)
+                font_medium = ImageFont.truetype(font_path, 28)
+                font_tiny = ImageFont.truetype(font_path, 22)
+            except (OSError, FileNotFoundError) as e:
+                logger.warning(f"加载字体失败，使用默认字体: {e}")
+                default_font = ImageFont.load_default()
+                font_large = default_font
+                font_medium = default_font
+                font_tiny = default_font
+            self._fonts = (font_large, font_medium, font_tiny)
+        return self._fonts
     
     def _load_yunshi_data(self) -> dict:
         """加载用户运势数据"""
@@ -252,24 +274,7 @@ class FortuneGenerator:
 
         try:
             draw = ImageDraw.Draw(canvas)
-            
-            # 按需加载字体（合并相同的 28 号字体，减少 1 份 16.7 MiB 字体实例）
-            try:
-                font_path = os.path.join(self.data_dir, "fonts", "千图马克手写体.ttf")
-                if not os.path.exists(font_path):
-                    font_path = os.path.join(self.data_dir, "fonts", "1.ttf")
-                
-                font_large = ImageFont.truetype(font_path, 72)
-                font_medium = ImageFont.truetype(font_path, 28)
-                font_small = font_medium
-                font_tiny = ImageFont.truetype(font_path, 22)
-            except (OSError, FileNotFoundError) as e:
-                logger.warning(f"加载字体失败，使用默认字体: {e}")
-                font_large = ImageFont.load_default()
-                font_medium = ImageFont.load_default()
-                font_small = font_medium
-                font_tiny = ImageFont.load_default()
-            
+
             fortune = fortune_data["fortune"]
             lucky_color = fortune_data["lucky_color"]
             lucky_number = fortune_data["lucky_number"]
@@ -299,49 +304,35 @@ class FortuneGenerator:
             
             name_x = avatar_x + avatar_size + 30
             name_y = avatar_y + 20
-            draw.text((name_x, name_y), user_name, fill=(255, 255, 255), font=font_medium)
-            
             date_str = datetime.now().strftime("%Y年%m月%d日")
-            draw.text((name_x, name_y + 70), date_str, fill=(200, 200, 200), font=font_small)
-            
             fortune_level = fortune["level"]
-            
-            bbox = draw.textbbox((0, 0), fortune_level, font=font_large)
-            level_width = bbox[2] - bbox[0]
-            level_x = target_width - level_width - 50
-            level_y = content_start_y + 20
-            
-            draw.text((level_x + 4, level_y + 4), fortune_level, fill=(0, 0, 0, 128), font=font_large)
-            draw.text((level_x, level_y), fortune_level, fill=fortune_color, font=font_large)
-            
             desc_y = content_start_y + 180
-            draw.text((50, desc_y), f"「{fortune['desc']}」", fill=(255, 255, 255), font=font_medium)
-            
             bar_y = desc_y + 80
             bar_width = 400
             bar_height = 30
             bar_x = 50
-            
-            draw.text((bar_x, bar_y), f"幸运指数：{luck_value}%", fill=(200, 200, 200), font=font_small)
-            
             bar_bg_y = bar_y + 55
-            draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + bar_width, bar_bg_y + bar_height)],
-                                   radius=bar_height // 2, fill=(80, 80, 80))
-            
-            progress_width = int(bar_width * luck_value / 100)
-            if progress_width > 0:
-                draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + progress_width, bar_bg_y + bar_height)],
-                                       radius=bar_height // 2, fill=fortune_color)
-            
             tips_y = bar_bg_y + 55
             lucky_color_hex = lucky_color['hex'].upper()
             lucky_color_name = lucky_color['name']
             color_text = f"幸运色：{lucky_color_name}({lucky_color_hex})"
-            
             color_block_size = 36
             color_block_x = 50
             color_block_y = tips_y
-            
+            text_x = color_block_x + color_block_size + 10
+            lucky_number_text = f"|  幸运数字：{lucky_number}"
+            footer_text = "仅供娱乐 · 相信科学 · 请勿迷信"
+            if addition_text:
+                footer_text = f"{addition_text} | {footer_text}"
+
+            draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + bar_width, bar_bg_y + bar_height)],
+                                   radius=bar_height // 2, fill=(80, 80, 80))
+
+            progress_width = int(bar_width * luck_value / 100)
+            if progress_width > 0:
+                draw.rounded_rectangle([(bar_x, bar_bg_y), (bar_x + progress_width, bar_bg_y + bar_height)],
+                                       radius=bar_height // 2, fill=fortune_color)
+
             draw.rounded_rectangle(
                 [(color_block_x, color_block_y),
                  (color_block_x + color_block_size, color_block_y + color_block_size)],
@@ -349,24 +340,36 @@ class FortuneGenerator:
                 fill=tuple(lucky_color['rgb'])
             )
 
-            text_x = color_block_x + color_block_size + 10
-            draw.text((text_x, tips_y), color_text, fill=(180, 180, 180), font=font_small)
-            
-            lucky_number_text = f"|  幸运数字：{lucky_number}"
-            lucky_number_x = text_x + draw.textlength(color_text, font=font_small) + 10
-            draw.text((lucky_number_x, tips_y), lucky_number_text,
-                     fill=(180, 180, 180), font=font_small)
-            
-            draw.text((50, tips_y + 55), advice, fill=(180, 180, 180), font=font_small)
-            
-            footer_text = "仅供娱乐 · 相信科学 · 请勿迷信"
-            if addition_text:
-                footer_text = f"{addition_text} | {footer_text}"
-                
-            bbox = draw.textbbox((0, 0), footer_text, font=font_tiny)
-            footer_width = bbox[2] - bbox[0]
-            footer_x = (target_width - footer_width) // 2
-            draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
+            # FreeTypeFace 非线程安全，仅在文字测量与绘制阶段持锁复用缓存字体
+            with self._font_lock:
+                font_large, font_medium, font_tiny = self._get_fonts()
+                font_small = font_medium
+
+                draw.text((name_x, name_y), user_name, fill=(255, 255, 255), font=font_medium)
+                draw.text((name_x, name_y + 70), date_str, fill=(200, 200, 200), font=font_small)
+
+                bbox = draw.textbbox((0, 0), fortune_level, font=font_large)
+                level_width = bbox[2] - bbox[0]
+                level_x = target_width - level_width - 50
+                level_y = content_start_y + 20
+
+                draw.text((level_x + 4, level_y + 4), fortune_level, fill=(0, 0, 0, 128), font=font_large)
+                draw.text((level_x, level_y), fortune_level, fill=fortune_color, font=font_large)
+
+                draw.text((50, desc_y), f"「{fortune['desc']}」", fill=(255, 255, 255), font=font_medium)
+                draw.text((bar_x, bar_y), f"幸运指数：{luck_value}%", fill=(200, 200, 200), font=font_small)
+
+                draw.text((text_x, tips_y), color_text, fill=(180, 180, 180), font=font_small)
+                lucky_number_x = text_x + draw.textlength(color_text, font=font_small) + 10
+                draw.text((lucky_number_x, tips_y), lucky_number_text,
+                         fill=(180, 180, 180), font=font_small)
+
+                draw.text((50, tips_y + 55), advice, fill=(180, 180, 180), font=font_small)
+
+                bbox = draw.textbbox((0, 0), footer_text, font=font_tiny)
+                footer_width = bbox[2] - bbox[0]
+                footer_x = (target_width - footer_width) // 2
+                draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
             
             result = canvas.convert('RGB')
             if return_background_bytes:
