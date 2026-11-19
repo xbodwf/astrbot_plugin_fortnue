@@ -22,7 +22,6 @@ class BackgroundManager:
         self.config = config
         self.proxy = proxy
         self.session = session
-)
     
     def _get_ignored_sources(self) -> list:
         """从配置获取忽略的图源列表"""
@@ -293,7 +292,6 @@ class BackgroundManager:
                     proxy=self.proxy,
                     session=self.session,
                 )
-)
             else:
                 resolved, addition_text, img_headers = await self._resolve_api_image_url(bg_spec)
                 if isinstance(resolved, Image.Image):
@@ -315,7 +313,6 @@ class BackgroundManager:
                     proxy=self.proxy,
                     session=self.session,
                 )
-)
             else:
                 background = Image.open(bg_url)
                 background.load()

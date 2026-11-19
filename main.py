@@ -160,13 +160,17 @@ class FortunePlugin(Star):
             self._get_proxy(),
             session=self._get_http_session(),
         )
-)
     
     def _get_moderator(self) -> ImageModerator:
         """获取图片审查器"""
         config = self._get_config()
         moderation_config = ConfigLoader.get_moderation_config(config)
-        moderator = ImageModerator(moderation_config, self.context, self._get_proxy())
+        moderator = ImageModerator(
+            moderation_config,
+            self.context,
+            self._get_proxy(),
+            session=self._get_http_session(),
+        )
         logger.debug(f"[插件配置] 审查器已创建，启用状态: {moderator.is_enabled()}")
         return moderator
     
