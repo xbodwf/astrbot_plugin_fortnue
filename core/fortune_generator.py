@@ -6,7 +6,6 @@ import os
 import tempfile
 import threading
 from datetime import datetime
-from io import BytesIO
 from astrbot.api import logger
 from astrbot.api.star import StarTools
 from PIL import Image, ImageDraw, ImageFont
@@ -213,45 +212,19 @@ class FortuneGenerator:
         return result_data
     
     def create_fortune_image(self, background: Image.Image, avatar: Image.Image | None,
-                             user_name: str, fortune_data: dict, addition_text: str = "",
-                             return_background_bytes: bool = False) -> Image.Image | tuple[Image.Image, bytes]:
-        """创建运势图片"""
+                             user_name: str, fortune_data: dict, addition_text: str = "") -> Image.Image:
+        """在背景图上叠加运势信息（未达目标尺寸时自动复用 process_background 一步裁剪缩放）。"""
         target_width = 800
         target_height = 1200
-        
-        # 处理背景图片（先裁剪缩放到目标尺寸，减少后续内存占用）
-        bg_ratio = background.width / background.height
-        target_ratio = target_width / target_height
-        
-        if bg_ratio > target_ratio:
-            new_width = int(background.height * target_ratio)
-            left = (background.width - new_width) // 2
-            cropped = background.crop((left, 0, left + new_width, background.height))
+
+        if background.size == (target_width, target_height):
+            rgba_bg = background.convert('RGBA')
         else:
-            new_height = int(background.width / target_ratio)
-            top = (background.height - new_height) // 2
-            cropped = background.crop((0, top, background.width, top + new_height))
-        
-        try:
-            resized = cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        finally:
-            cropped.close()
-
-        bg_jpeg_bytes = b""
-        if return_background_bytes:
-            rgb_for_save = resized.convert('RGB') if resized.mode != 'RGB' else None
-            buf = BytesIO()
+            resized = ImageUtils.process_background(background, target_width, target_height)
             try:
-                (rgb_for_save or resized).save(buf, format="JPEG", quality=95)
-                bg_jpeg_bytes = buf.getvalue()
+                rgba_bg = resized.convert('RGBA')
             finally:
-                buf.close()
-                if rgb_for_save is not None:
-                    rgb_for_save.close()
-
-        rgba_bg = resized.convert('RGBA') if resized.mode != 'RGBA' else resized
-        if rgba_bg is not resized:
-            resized.close()
+                resized.close()
         
         # 底部半透明渐变遮罩（使用 1x600 渐变条拉伸替代 600 次逐行绘制）
         gradient_height = 600
@@ -371,9 +344,6 @@ class FortuneGenerator:
                 footer_x = (target_width - footer_width) // 2
                 draw.text((footer_x, target_height - 50), footer_text, fill=(120, 120, 120), font=font_tiny)
             
-            result = canvas.convert('RGB')
-            if return_background_bytes:
-                return result, bg_jpeg_bytes
-            return result
+            return canvas.convert('RGB')
         finally:
             canvas.close()

@@ -44,38 +44,44 @@ class ImageUtils:
             mask.close()
     
     @staticmethod
-    def image_to_base64(img: Image.Image, quality: int = 85) -> str:
-        """将图片转换为 base64 编码"""
+    def encode_jpeg(img: Image.Image, quality: int = 90) -> bytes:
+        """将图像编码为 JPEG 字节并及时释放临时缓冲区。"""
         buffered = BytesIO()
-        converted = img.convert('RGB') if img.mode == 'RGBA' else None
+        converted = img.convert('RGB') if img.mode != 'RGB' else None
         try:
             (converted or img).save(buffered, format="JPEG", quality=quality)
-            return base64.b64encode(buffered.getvalue()).decode('utf-8')
+            return buffered.getvalue()
         finally:
             if converted is not None:
                 converted.close()
             buffered.close()
+
+    @staticmethod
+    def image_to_base64(img: Image.Image, quality: int = 85) -> str:
+        """将图片转换为 base64 编码"""
+        return base64.b64encode(ImageUtils.encode_jpeg(img, quality=quality)).decode('utf-8')
     
     @staticmethod
     def process_background(bg: Image.Image, target_width: int = 800, 
                            target_height: int = 1200) -> Image.Image:
-        """处理背景图片（裁剪和缩放）"""
+        """一步居中裁剪并缩放到目标尺寸，避免额外的中间大图拷贝。"""
         bg_ratio = bg.width / bg.height
         target_ratio = target_width / target_height
         
         if bg_ratio > target_ratio:
             new_width = int(bg.height * target_ratio)
             left = (bg.width - new_width) // 2
-            cropped = bg.crop((left, 0, left + new_width, bg.height))
+            crop_box = (left, 0, left + new_width, bg.height)
         else:
             new_height = int(bg.width / target_ratio)
             top = (bg.height - new_height) // 2
-            cropped = bg.crop((0, top, bg.width, top + new_height))
+            crop_box = (0, top, bg.width, top + new_height)
         
-        try:
-            resized = cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        finally:
-            cropped.close()
+        resized = bg.resize(
+            (target_width, target_height),
+            Image.Resampling.LANCZOS,
+            box=crop_box,
+        )
         
         if resized.mode != 'RGB':
             try:

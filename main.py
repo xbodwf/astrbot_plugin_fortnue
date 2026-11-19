@@ -8,7 +8,6 @@ from astrbot.api import logger, llm_tool
 import asyncio
 from collections import OrderedDict
 import contextlib
-from io import BytesIO
 import os
 import tempfile
 import weakref
@@ -286,17 +285,17 @@ class FortunePlugin(Star):
                         logger.info("[运势生成] 图片审查未启用")
 
                     def _render_none_to_bytes(src_bg) -> bytes:
+                        processed = None
                         try:
-                            result_image = ImageUtils.process_background(src_bg)
-                            buf = BytesIO()
-                            try:
-                                result_image.save(buf, format="JPEG", quality=95)
-                                return buf.getvalue()
-                            finally:
-                                buf.close()
-                                result_image.close()
-                        finally:
+                            processed = ImageUtils.process_background(src_bg)
                             src_bg.close()
+                            src_bg = None
+                            return ImageUtils.encode_jpeg(processed, quality=95)
+                        finally:
+                            if processed is not None:
+                                processed.close()
+                            if src_bg is not None:
+                                src_bg.close()
 
                     transferred_to_worker = True
                     slot_transferred = True
@@ -327,15 +326,21 @@ class FortunePlugin(Star):
             yield event.plain_result(error_msg or "获取失败: 未知错误")
             return
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            f.write(jpeg_bytes)
-            temp_path = f.name
+        async for res in self._send_jpeg_bytes(event, jpeg_bytes):
+            yield res
 
+    async def _send_jpeg_bytes(self, event: AstrMessageEvent, jpeg_bytes: bytes):
+        """将 JPEG 字节写入临时文件发送并在发送后清理。"""
+        temp_path = None
         try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+                f.write(jpeg_bytes)
+                temp_path = f.name
             yield event.image_result(temp_path)
         finally:
-            with contextlib.suppress(OSError):
-                os.remove(temp_path)
+            if temp_path:
+                with contextlib.suppress(OSError):
+                    os.remove(temp_path)
 
     async def _handle_fortune_generation(self, event: AstrMessageEvent, source_name: str = None):
         """处理运势图片生成逻辑"""
@@ -451,24 +456,29 @@ class FortunePlugin(Star):
                     fortune_data = self.fortune_generator.get_fortune_for_user(user_id)
 
                     def _render_fortune_to_bytes(src_bg, src_avatar) -> tuple[bytes, bytes]:
+                        processed = None
                         try:
-                            result_image, bg_bytes = self.fortune_generator.create_fortune_image(
-                                src_bg,
+                            processed = ImageUtils.process_background(src_bg)
+                            # 裁成 800x1200 后立刻释放 4K 原图，降低叠字阶段峰值内存
+                            src_bg.close()
+                            src_bg = None
+                            bg_bytes = ImageUtils.encode_jpeg(processed, quality=95)
+                            result_image = self.fortune_generator.create_fortune_image(
+                                processed,
                                 src_avatar,
                                 user_name,
                                 fortune_data,
                                 addition_text,
-                                return_background_bytes=True,
                             )
-                            buf = BytesIO()
                             try:
-                                result_image.save(buf, format="JPEG", quality=90)
-                                return buf.getvalue(), bg_bytes
+                                return ImageUtils.encode_jpeg(result_image, quality=90), bg_bytes
                             finally:
-                                buf.close()
                                 result_image.close()
                         finally:
-                            src_bg.close()
+                            if processed is not None:
+                                processed.close()
+                            if src_bg is not None:
+                                src_bg.close()
                             if src_avatar is not None:
                                 src_avatar.close()
 
@@ -507,15 +517,8 @@ class FortunePlugin(Star):
         # 出图成功后才原子更新 /last 缓存，避免并发覆写或失败污染
         self._store_last_background(user_id, bg_bytes)
 
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-            f.write(result_bytes)
-            temp_path = f.name
-
-        try:
-            yield event.image_result(temp_path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.remove(temp_path)
+        async for res in self._send_jpeg_bytes(event, result_bytes):
+            yield res
 
     @filter.command("jrys", alias=["今日运势", "运势"])
     async def jrys_cmd(self, event: AstrMessageEvent):
@@ -565,20 +568,13 @@ class FortunePlugin(Star):
             yield event.plain_result("你还没有生成过今日运势，请先使用 /jrys 生成一次~")
             return
             
-        temp_path = None
         try:
             self.user_last_backgrounds.move_to_end(user_id)
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                f.write(bg_bytes)
-                temp_path = f.name
-            yield event.image_result(temp_path)
+            async for res in self._send_jpeg_bytes(event, bg_bytes):
+                yield res
         except Exception as e:
             logger.error(f"获取上次背景图片失败: {e}")
             yield event.plain_result(f"获取失败: {e}")
-        finally:
-            if temp_path:
-                with contextlib.suppress(OSError):
-                    os.remove(temp_path)
 
     @jrysl.command("restore")
     async def restore(self, event: AstrMessageEvent):

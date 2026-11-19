@@ -170,34 +170,41 @@ REJECT
         img: Image.Image,
         max_side: int = _MODERATION_MAX_SIDE,
     ) -> tuple[bytes, tuple[int, int]]:
-        """在工作线程中缩放并转码待审核图片为 JPEG 字节，避免发送 4K 原图。"""
-        working = None
-        if img.mode in ('RGBA', 'LA', 'P'):
-            rgba = img.convert('RGBA') if img.mode != 'RGBA' else None
-            src = rgba or img
-            working = Image.new('RGB', src.size, (255, 255, 255))
-            try:
-                working.paste(src, mask=src.split()[-1])
-            finally:
-                if rgba is not None:
-                    rgba.close()
-        elif img.mode != 'RGB':
-            working = img.convert('RGB')
-        else:
-            working = img.copy()
+        """在工作线程中先用 BILINEAR 缩图再转码为 JPEG 字节，避免 4K 整图拷贝与 LANCZOS 开销。"""
+        from ..utils.image_utils import ImageUtils
 
+        width, height = img.size
+        longest = max(width, height)
+        resized = None
+        if longest > max_side:
+            scale = max_side / longest
+            new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+            resized = img.resize(new_size, Image.Resampling.BILINEAR)
+            src = resized
+        else:
+            src = img
+
+        flattened = None
         try:
-            if max(working.size) > max_side:
-                working.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
-            preview_size = working.size
-            buf = BytesIO()
-            try:
-                working.save(buf, format="JPEG", quality=85)
-                return buf.getvalue(), preview_size
-            finally:
-                buf.close()
+            if src.mode in ('RGBA', 'LA', 'P'):
+                rgba = src.convert('RGBA') if src.mode != 'RGBA' else None
+                rgba_src = rgba or src
+                flattened = Image.new('RGB', rgba_src.size, (255, 255, 255))
+                try:
+                    flattened.paste(rgba_src, mask=rgba_src.split()[-1])
+                finally:
+                    if rgba is not None:
+                        rgba.close()
+                target = flattened
+            else:
+                target = src
+
+            return ImageUtils.encode_jpeg(target, quality=85), target.size
         finally:
-            working.close()
+            if flattened is not None:
+                flattened.close()
+            if resized is not None:
+                resized.close()
 
     def _evaluate_moderation_text(
         self,
